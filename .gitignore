@@ -1,0 +1,5 @@
+**/redbox-backups/
+**/__pycache__/
+
+# Temporary:
+/software/host/library/*.toml

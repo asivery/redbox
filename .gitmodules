@@ -1,0 +1,6 @@
+[submodule "hardware/redbox/MT3608-module-kicad"]
+	path = hardware/redbox/MT3608-module-kicad
+	url = https://github.com/barafael/MT3608-module-kicad
+[submodule "hardware/redbox/RP2040-Zero-Kicad"]
+	path = hardware/redbox/RP2040-Zero-Kicad
+	url = https://github.com/CountParadox/RP2040-Zero-Kicad
