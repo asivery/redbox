@@ -12,17 +12,30 @@ class ChipWriteData:
     # [[bitreg, value], [bitreg2, value2]]
     forceadjust: list[list[int]] = field(default_factory=list)
 
+    def apply_forceadjust(self, image: bytes) -> bytes:
+        image = list(image)
+        for (register_bit_no, value) in self.forceadjust:
+            base, bit_off = divmod(register_bit_no, 8)
+            if value:
+                image[base] |= (1 << bit_off)
+            else:
+                image[base] &= ~(1 << bit_off)
+        return bytes(image)
+
+
     def prepare_image(self, image: bytes, ignore_forceadjust: bool):
         if not ignore_forceadjust:
-            image = list(image)
-            for (register_bit_no, value) in self.forceadjust:
-                base, bit_off = divmod(register_bit_no, 8)
-                if value:
-                    image[base] |= (1 << bit_off)
-                else:
-                    image[base] &= ~(1 << bit_off)
-            image = bytes(image)
+            image = self.apply_forceadjust(image)
         return self.padstart + image + self.padend
+
+@dataclass
+class Lockout:
+    name: str
+    description: str
+    # Raw:
+    # [[addr, 'OP', value], ...] where addr is value from OTP image, OP in ['AND', 'OR', 'XOR'], value is byte.
+    raw: list = None
+    reflect: list[str] = None
 
 @dataclass
 class ChipData:
@@ -34,6 +47,8 @@ class ChipData:
 
     write_ram_data: ChipWriteData = field(default_factory=ChipWriteData) # Config for writing RAM
     write_otp_data: ChipWriteData = field(default_factory=ChipWriteData) # Config for writing OTP
+
+    lockout_instructions: list[Lockout] = field(default_factory=list)
 
     def build_system_data_for_otp(self, content: bytes, ignore_forceadjust: bool):
         return SystemData(self.i2caddrs, self.write_otp_data.engagepctl, self.write_otp_data.prepare_image(content, ignore_forceadjust), self.initseq)
@@ -70,6 +85,39 @@ def form_system_data_from_library(chip_name: str) -> ChipData:
         chip_data.write_otp_data = parse_chip_write_data(content['write_otp'])
     if len(chip_data.verification_mask) != chip_data.programsize:
         raise BaseException("Invalid library file: Verification mask length does not match program data length")
+
+    if 'lockout' in content:
+        if not isinstance(content['lockout'], list):
+            raise BaseException("Invalid library file: Lockout is not a list of possible lockout modes")
+        lockouts = []
+        lockout_exist = lambda e: sum(1 for x in lockouts if x.name == e) > 0
+        for x in content['lockout']:
+            entry = Lockout(x['name'], x['description'])
+            if 'reflect' in x:
+                # Check if all reflect paths exist
+                reflect_paths = x['reflect'].split('+')
+                if not all(lockout_exist(x) for x in reflect_paths):
+                    raise BaseException(f"Invalid reflect path for lockout mode {entry.name}")
+                entry.reflect = reflect_paths
+            if 'raw' in x:
+                steps = x['raw']
+                if not isinstance(steps, list):
+                    raise BaseException("Invalid library file: Lockout's raw attribute is not a list of steps")
+                for i, x in enumerate(steps):
+                    if  not isinstance(x, list) or \
+                        x[0] >= chip_data.programsize or \
+                        x[1] not in ['OR', 'AND', 'XOR', 'SET'] or \
+                        x[2] not in range(0, 256) or \
+                        not isinstance(x[0], int) or \
+                        not isinstance(x[2], int):
+                            raise BaseException(f"Invalid library file: Invalid step {i}")
+                entry.raw = steps
+            if not (bool(entry.raw) ^ bool(entry.reflect)):
+                raise BaseException("Invalid library file. Lockout must be either 'raw' or 'reflect'!")
+            lockouts.append(entry)
+        chip_data.lockout = lockouts
+
+
     return chip_data
 
 
@@ -158,6 +206,58 @@ def read_ram(args):
 def dump_ram(args):
     dump_mem(args, 'read_ram', 'RAM')
 
+def find_lockout(chip_data: ChipData, name: str) -> Lockout:
+    for lockout in chip_data.lockout:
+        if lockout.name == name: return lockout
+    raise BaseException(f"No such lockout mode: '{name}'")
+
+
+def perform_lockout_step(rb: RedBox, chip_data: ChipData, lockout: Lockout, memory: bytes):
+    if lockout.reflect:
+        for step_name in lockout.reflect:
+            memory = perform_lockout_step(rb, chip_data, find_lockout(chip_data, step_name), memory)
+        return memory
+    else:
+        # List of steps.
+        # Resolve each step to its final form
+        # Lockout = We're working on OTP
+        final_step = list(memory)
+        for value in lockout.raw:
+            # Resolve
+            base = final_step[value[0]]
+            operand = value[2]
+            if value[1] == 'AND': base &= operand
+            elif value[1] == 'OR': base |= operand
+            elif value[1] == 'XOR': base ^= operand
+            elif value[1] == 'SET': base = operand
+            else: raise BaseException("Invalid state") # Should have been verified at deserialization step
+            final_step[value[0]] = base
+        return bytes(final_step)
+
+
+def lockout(args):
+    chip_data = form_system_data_from_library(args.chip)
+    contents = chip_data.write_otp_data.apply_forceadjust(read_image(args.file))
+
+    if len(args.mode) == 0:
+        # Print help for current chip
+        print("Available lockout modes:")
+        for lockout in chip_data.lockout:
+            print(f" - {lockout.name}: {lockout.description}")
+    else:
+        if not args.no_confirm:
+            if input("Please type 'YES' to continue. This action will write the one-time-programmable memory. This action CANNOT BE UNDONE. ") != 'YES':
+                print("Aborted.")
+                return
+        rb = RedBox()
+        final_memory = contents
+        for mode in args.mode:
+            lockout = find_lockout(chip_data, mode)
+            final_memory = perform_lockout_step(rb, chip_data, lockout, final_memory)
+        wr_step = chip_data.build_system_data_for_otp(final_memory, True)
+        rb.write_system_data(wr_step)
+        rb.program()
+
 def main():
     args = ArgumentParser(
         prog='RedBox',
@@ -192,6 +292,12 @@ def main():
 
     parser_dump_otp = subparsers.add_parser('dump-otp', help='Dump the GreenPAK\'s OTP as HEX to the terminal')
     parser_dump_otp.set_defaults(func=dump_mem)
+
+    parser_lockout = subparsers.add_parser('lockout', help='Disable reading / writing the OTP / RAM')
+    parser_lockout.add_argument('file', help='OTP memory image')
+    parser_lockout.add_argument('mode', help='Lockout mode', nargs='*')
+    parser_lockout.add_argument('-y', '--no-confirm', help="Skip the confirmation prompt", action='store_true')
+    parser_lockout.set_defaults(func=lockout)
 
     parsed = args.parse_args()
     parsed.func(parsed)
