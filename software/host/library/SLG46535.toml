@@ -1,0 +1,60 @@
+[meta]
+chip = 'SLG46535'
+i2caddrs = [0, 4, 8, 16]
+initseq = 0
+programsize = 256
+verification_mask = """
+FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF
+FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF
+FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF
+FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF
+FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF
+FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF
+FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF
+FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF
+FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF
+FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF
+FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF
+FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+"""
+
+[write_ram]
+engagepctl = false
+
+[write_otp]
+padstart = [0]
+padend = [0]
+engagepctl = true
+forceadjust = [
+    # Do not write the lockout bits before verification (unless forced-on)
+    [1870, 0], [1871, 0], [1832, 0], [1477, 0]
+]
+
+[[lockout]]
+name = "read"
+description = "I2C lock for read bits <1535:0>"
+raw = [[0xE5, 'OR', 0b00000001]]
+
+[[lockout]]
+name = "write_all"
+description = "I2C lock for write all bits"
+raw = [[0xE9, 'OR', 0b01000000]]
+
+[[lockout]]
+name = "write_prog"
+description = "I2C lock for write bits <1535:0>"
+raw = [[0xE9, 'OR', 0b10000000]]
+
+[[lockout]]
+name = "finalize"
+description = "Disable the OTP memory to prevent further modification"
+raw = [[0xB8, 'OR', 0b00100000]]
+
+[[lockout]]
+name = "all"
+description = "I2C lock for complete lockout"
+reflect = "read+write_all+finalize"
